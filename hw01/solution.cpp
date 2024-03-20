@@ -74,8 +74,7 @@ struct ProblemPackWrapper {
     }
 };
 
-class SolverWrapper {
-public:
+struct SolverWrapper {
     std::string type;
     AProgtestSolver solver;
     std::set<shared_ptr<ProblemPackWrapper>> inSolver;
