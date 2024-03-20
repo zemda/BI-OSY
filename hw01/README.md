@@ -1,3 +1,5 @@
+# Příhradová konstrukce
+
 Úkolem je realizovat sadu tříd, které budou optimalizovat příhradové konstrukce.
 
 Předpokládáme, že máme zkonstruovat nosník, který bude co nejpevnější a zároveň co nejlevnější. Nosník bude mít tvar mnohoúhelníku, může být obecně nekonvexní. Takový mnohoúhelník vyztužíme tím, že přidáme dodatečné výztuhy propojující body mnohoúhelníku. Aby byl nosník co nejpevnější, přidáme co nejvíce takových dodatečných výztuh, které se nekříží. Výztuhy tak rozdělí mnohoúhelník na disjunktní trojúhelníky. Úkolem je nalézt umístění výztuh tak, aby se spotřebovalo co nejméně materiálu, tedy aby součet délek dodaných výztuh byl co nejmenší. Formálně se jedná o problém minimální triangulace nekonvexního mnohoúhelníku.
