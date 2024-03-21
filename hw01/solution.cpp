@@ -48,14 +48,13 @@ struct ProblemPackWrapper;
 
 struct CompanyWrapper {
     ACompany company;
-    long unsigned int id = 0;
     shared_ptr<std::condition_variable> cv;
     std::unordered_map<size_t, std::shared_ptr<ProblemPackWrapper>> solvedProblems; // order and pack
     shared_ptr<std::mutex> mtx;
     std::set<size_t> solvedOrders;
 
-    explicit CompanyWrapper(ACompany company, const long unsigned int id)
-        : company(std::move(company)), id(id), cv(std::make_shared<std::condition_variable>()), mtx(std::make_shared<std::mutex>()) {
+    explicit CompanyWrapper(ACompany company)
+        : company(std::move(company)), cv(std::make_shared<std::condition_variable>()), mtx(std::make_shared<std::mutex>()) {
     }
 };
 
@@ -112,14 +111,14 @@ public:
     }
 
     void addCompany(ACompany company) {
-        companies.emplace_back(company, companies.size());
+        companies.emplace_back(company);
     }
     void start(int workThreads) {
         activeReceivers = (int)companies.size();
         activeWorkers = workThreads;
 
         for (int i = 0; i < workThreads; i++)
-            workerThreads.emplace_back(&COptimizer::workerFunction, this, i);
+            workerThreads.emplace_back(&COptimizer::workerFunction, this);
 
         for (auto &companyWrapper : companies) {
             receiverThreads.emplace_back(&COptimizer::receiverFunction, this, std::ref(companyWrapper));
@@ -171,10 +170,8 @@ private:
                     count = 0;
                     solvers.push(std::move(solver));
                     cv.notify_all();
-                    if (type == "min")
-                        solver = std::make_shared<SolverWrapper>("min", createProgtestMinSolver());
-                    else
-                        solver = std::make_shared<SolverWrapper>("cnt", createProgtestCntSolver());
+                    type == "min" ? solver = std::make_shared<SolverWrapper>("min", createProgtestMinSolver()) :
+                                    solver = std::make_shared<SolverWrapper>("cnt", createProgtestCntSolver());
                 }
             }
         }
@@ -204,16 +201,14 @@ private:
             }
 
             std::lock_guard<std::mutex> lock(queueMtx);
-            if (!problemPack->m_ProblemsMin.empty())
-                processProblems(problemPack->m_ProblemsMin, solver_min, problemPack, order, companyWrapper, "min");
-            if (!problemPack->m_ProblemsCnt.empty())
-                processProblems(problemPack->m_ProblemsCnt, solver_cnt, problemPack, order, companyWrapper, "cnt");
+            processProblems(problemPack->m_ProblemsMin, solver_min, problemPack, order, companyWrapper, "min");
+            processProblems(problemPack->m_ProblemsCnt, solver_cnt, problemPack, order, companyWrapper, "cnt");
 
             order++;
         }
     }
 
-    void workerFunction(const int id) {
+    void workerFunction() {
         while (true) {
             std::unique_lock<std::mutex> lock(queueMtx);
             cv.wait(lock, [this](){ return !activeReceivers || !solvers.empty() || !activeWorkers; });
