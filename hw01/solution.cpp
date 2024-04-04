@@ -49,9 +49,8 @@ struct ProblemPackWrapper;
 struct CompanyWrapper {
     ACompany company;
     shared_ptr<std::condition_variable> cv;
-    std::unordered_map<size_t, std::shared_ptr<ProblemPackWrapper>> solvedProblems; // order and pack
+    std::queue<shared_ptr<ProblemPackWrapper>> problemPacks;
     shared_ptr<std::mutex> mtx;
-    std::set<size_t> solvedOrders;
 
     explicit CompanyWrapper(ACompany company)
         : company(std::move(company)), cv(std::make_shared<std::condition_variable>()), mtx(std::make_shared<std::mutex>()) {
@@ -59,24 +58,23 @@ struct CompanyWrapper {
 };
 
 struct ProblemPackWrapper {
-    size_t order;
     CompanyWrapper *companyWrapper;
     AProblemPack problemPack;
-    size_t solved = 0;
+    atomic<size_t> solved = 0;
 
     bool isSolved() const {
         return problemPack->m_ProblemsMin.size() + problemPack->m_ProblemsCnt.size() == solved;
     }
 
-    ProblemPackWrapper(const size_t order, CompanyWrapper *companyWrapper, AProblemPack problemPack)
-        : order(order), companyWrapper(companyWrapper), problemPack(std::move(problemPack)) {
+    ProblemPackWrapper(CompanyWrapper *companyWrapper, AProblemPack problemPack)
+        : companyWrapper(companyWrapper), problemPack(std::move(problemPack)) {
     }
 };
 
 struct SolverWrapper {
     std::string type;
     AProgtestSolver solver;
-    std::set<shared_ptr<ProblemPackWrapper>> inSolver;
+    std::unordered_map<shared_ptr<ProblemPackWrapper>, size_t> inSolver;
 
     SolverWrapper(std::string type, AProgtestSolver solver) : type(std::move(type)), solver(std::move(solver)){
     }
@@ -84,18 +82,11 @@ struct SolverWrapper {
     void solveWrapper() const {
         solver->solve();
 
-        for (const std::shared_ptr<ProblemPackWrapper> &x : inSolver) {
-            std::lock_guard<std::mutex> lock(*x->companyWrapper->mtx);
+        for (const auto& [x, problems] : inSolver) {
+            x->solved += problems;
 
-            if (x->companyWrapper->solvedProblems.contains(x->order))
-                x->companyWrapper->solvedProblems[x->order]->solved += x->solved;
-            else
-                x->companyWrapper->solvedProblems[x->order] = x;
-
-            if (x->companyWrapper->solvedProblems[x->order]->isSolved()) {
-                x->companyWrapper->solvedOrders.insert(x->order);
+            if (x->isSolved())
                 x->companyWrapper->cv->notify_all();
-            }
         }
     }
 };
@@ -132,20 +123,13 @@ public:
             thread.join();
         for (auto &thread : workerThreads)
             thread.join();
-
-        receiverThreads.clear();
-        senderThreads.clear();
-        workerThreads.clear();
     }
 
 private:
-    std::atomic<int> activeReceivers;
-    std::atomic<int> activeWorkers;
+    std::atomic<int> activeReceivers, activeWorkers;
     std::condition_variable cv;
     std::vector<CompanyWrapper> companies;
-    std::vector<std::thread> workerThreads;
-    std::vector<std::thread> receiverThreads;
-    std::vector<std::thread> senderThreads;
+    std::vector<std::thread> workerThreads, receiverThreads, senderThreads;
     std::mutex queueMtx;
     std::queue<shared_ptr<SolverWrapper>> solvers;
 
@@ -154,9 +138,7 @@ private:
 
     void processProblems(const std::vector<APolygon>& problems,
                         shared_ptr<SolverWrapper>& solver,
-                        const AProblemPack& problemPack,
-                        const size_t order,
-                        CompanyWrapper& companyWrapper,
+                        const shared_ptr<ProblemPackWrapper>& pack,
                         const string& type) {
         size_t count = 0;
         for (const auto &polygon : problems) {
@@ -164,9 +146,7 @@ private:
                 solver->solver->addPolygon(polygon);
                 count++;
                 if (!solver->solver->hasFreeCapacity()) {
-                    auto pack = std::make_shared<ProblemPackWrapper>(order, &companyWrapper, problemPack);
-                    solver->inSolver.insert(pack);
-                    pack->solved = count;
+                    solver->inSolver[pack] = count;
                     count = 0;
                     solvers.push(std::move(solver));
                     cv.notify_all();
@@ -175,15 +155,11 @@ private:
                 }
             }
         }
-        if (count > 0) {
-            const auto pack = std::make_shared<ProblemPackWrapper>(order, &companyWrapper, problemPack);
-            solver->inSolver.insert(pack);
-            pack->solved = count;
-        }
+        if (count > 0)
+            solver->inSolver[pack] = count;
     }
 
     void receiverFunction(CompanyWrapper &companyWrapper) {
-        size_t order = 0;
         while (true) {
             AProblemPack problemPack = companyWrapper.company->waitForPack();
             if (!problemPack) {
@@ -199,12 +175,15 @@ private:
                 cv.notify_all();
                 return;
             }
+            auto pack = std::make_shared<ProblemPackWrapper>(&companyWrapper, problemPack);
+            {
+                std::lock_guard<std::mutex> lock(*companyWrapper.mtx);
+                companyWrapper.problemPacks.push(pack);
+            }
 
             std::lock_guard<std::mutex> lock(queueMtx);
-            processProblems(problemPack->m_ProblemsMin, solver_min, problemPack, order, companyWrapper, "min");
-            processProblems(problemPack->m_ProblemsCnt, solver_cnt, problemPack, order, companyWrapper, "cnt");
-
-            order++;
+            processProblems(problemPack->m_ProblemsMin, solver_min, pack,"min");
+            processProblems(problemPack->m_ProblemsCnt, solver_cnt, pack, "cnt");
         }
     }
 
@@ -230,18 +209,17 @@ private:
     }
 
     void senderFunction(CompanyWrapper &companyWrapper) const {
-        size_t order = 0;
         while (true) {
             std::unique_lock<std::mutex> lock(*companyWrapper.mtx);
-            companyWrapper.cv->wait(lock, [&](){ return !activeWorkers || companyWrapper.solvedOrders.contains(order); });
+            companyWrapper.cv->wait(lock, [&](){ return !activeWorkers ||
+                                          (!companyWrapper.problemPacks.empty() && companyWrapper.problemPacks.front()->isSolved()); });
 
-            if (!activeWorkers && companyWrapper.solvedProblems.empty())
+            if (!activeWorkers && companyWrapper.problemPacks.empty())
                 return;
 
-            if (companyWrapper.solvedOrders.contains(order)) {
-                companyWrapper.company->solvedPack(companyWrapper.solvedProblems[order]->problemPack);
-                companyWrapper.solvedProblems.erase(order);
-                ++order;
+            if (!companyWrapper.problemPacks.empty() && companyWrapper.problemPacks.front()->isSolved()) {
+                companyWrapper.company->solvedPack(companyWrapper.problemPacks.front()->problemPack);
+                companyWrapper.problemPacks.pop();
             }
         }
     }
@@ -253,7 +231,7 @@ private:
 int main() {
     COptimizer optimizer;
 
-    int companyNum = 90;
+    int companyNum = 200;
     std::vector<ACompanyTest> companies;
     companies.reserve(companyNum + 1);
     for (int x = 0; x < companyNum; x++)
